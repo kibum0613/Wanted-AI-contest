@@ -14,17 +14,18 @@ import zipfile
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--git", default="git", help="Git executable (git.exe for WSL on a Windows checkout)")
+    parser.add_argument("--git", default="git", help="Git executable")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
+    git = [args.git, "-c", f"safe.directory={root}"]
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     source = subprocess.check_output(
-        [args.git, "archive", "--format=tar", "HEAD", "backend", "frontend", "requirements.txt"],
+        [*git, "archive", "--format=tar", "HEAD", "backend", "frontend", "requirements.txt"],
         cwd=root,
     )
     startup = subprocess.check_output(
-        [args.git, "show", "HEAD:scripts/start_azure.sh"], cwd=root,
+        [*git, "show", "HEAD:scripts/start_azure.sh"], cwd=root,
     )
     with tempfile.TemporaryDirectory(prefix="wanted-azure-package-") as temporary:
         work = Path(temporary)
