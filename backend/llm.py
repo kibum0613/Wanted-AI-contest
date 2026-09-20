@@ -27,6 +27,46 @@ from backend.deployment import (
 KNOWLEDGE_FILE = Path(__file__).resolve().parent / "data" / "knowledge.json"
 CLAUDE_TIMEOUT_S = 90
 HTTP_TIMEOUT_S = 60
+EXPLANATION_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "why": {"type": "STRING"},
+        "impact": {"type": "ARRAY", "items": {"type": "STRING"}, "minItems": 1, "maxItems": 3},
+        "recommendation": {"type": "STRING"},
+        "past_case": {"type": "STRING"},
+    },
+    "required": ["why", "impact", "recommendation", "past_case"],
+}
+COMMAND_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "ops": {
+            "type": "ARRAY", "maxItems": 20,
+            "items": {
+                "type": "OBJECT",
+                "description": "Include only the fields needed by the chosen operation; omit unused optional fields.",
+                "properties": {
+                    "op": {"type": "STRING", "enum": ["place", "move", "rotate", "delete", "add_equipment"]},
+                    "id": {"type": "STRING"},
+                    "type": {"type": "STRING", "enum": [
+                        "bed", "wardrobe", "desk", "sofa", "fridge", "bookshelf",
+                        "tv_stand", "washing_machine", "table",
+                    ]},
+                    "room": {"type": "STRING"},
+                    "near": {"type": "STRING"},
+                    "delta": {"type": "ARRAY", "items": {"type": "NUMBER"}, "minItems": 3, "maxItems": 3},
+                    "center": {"type": "ARRAY", "items": {"type": "NUMBER"}, "minItems": 2, "maxItems": 2},
+                },
+                "required": ["op"],
+            },
+        },
+        "reply": {
+            "type": "STRING",
+            "description": "Describe the requested operations. If no operation is possible, explain why; do not claim completion.",
+        },
+    },
+    "required": ["ops", "reply"],
+}
 
 
 def _load_env() -> None:
@@ -148,7 +188,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _free_gemini_text(prompt: str) -> str:
+def _free_gemini_text(prompt: str, *, response_schema: dict | None = None) -> str:
     path = validate_config()
     if not isinstance(prompt, str) or len(prompt) > MAX_PROMPT_CHARS or len(prompt.encode("utf-8")) > 64000:
         raise AIError("ai_prompt_limit", 413, "AI 요청이 너무 큽니다. 배치나 대화를 줄여주세요.",
@@ -161,6 +201,11 @@ def _free_gemini_text(prompt: str) -> str:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": 4096},
         }
+        if response_schema is not None:
+            payload["generationConfig"].update({
+                "responseMimeType": "application/json",
+                "responseSchema": response_schema,
+            })
         request = urllib.request.Request(
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
             data=json.dumps(payload).encode("utf-8"),
@@ -174,6 +219,10 @@ def _free_gemini_text(prompt: str) -> str:
                 raise invalid_response()
             out = json.loads(raw)
             candidate = out["candidates"][0]
+            if candidate.get("finishReason") == "MAX_TOKENS":
+                raise AIError("ai_output_truncated", 502,
+                              "AI 응답이 출력 한도에서 중단되어 적용하지 않았습니다. 더 짧고 간단한 요청으로 다시 시도하세요.",
+                              "The AI response reached its output limit and was not applied. Try a shorter, simpler request.")
             if candidate.get("finishReason") != "STOP":
                 raise invalid_response()
             parts = candidate["content"]["parts"]
@@ -212,13 +261,13 @@ def _openai_compat_text(prompt: str, url: str, key: str, model: str) -> str | No
         return None
 
 
-def llm_text(prompt: str) -> str | None:
+def llm_text(prompt: str, *, response_schema: dict | None = None) -> str | None:
     """Fast-provider dispatch: Gemini/Groq/OpenAI via direct HTTP if an API key
     is configured (1-3s), otherwise fall back to the Claude Code CLI (slower
     because every call cold-starts a full CLI session)."""
     validate_config()
     if free_mode():
-        return _free_gemini_text(prompt)
+        return _free_gemini_text(prompt, response_schema=response_schema)
     if os.environ.get("GEMINI_API_KEY"):
         r = _gemini_text(prompt)
         if r:
@@ -240,14 +289,14 @@ def llm_text(prompt: str) -> str | None:
     return _claude_text(prompt)
 
 
-def _call_claude(prompt: str) -> dict | None:
+def _call_claude(prompt: str, *, response_schema: dict | None = None) -> dict | None:
     """Run the configured LLM and parse its reply as JSON."""
-    text = llm_text(prompt)
+    text = llm_text(prompt, response_schema=response_schema)
     if text is None:
         return None
     try:
-        # strip accidental code fences
-        if text.startswith("```"):
+        # Legacy providers may wrap JSON; schema-constrained public responses must be JSON.
+        if not free_mode() and text.startswith("```"):
             text = text.strip("`")
             text = text[text.find("{"):text.rfind("}") + 1]
         result = json.loads(text)
@@ -295,7 +344,9 @@ def explain_violation(violation: dict, candidates: list[dict]) -> dict[str, Any]
     if key in _CACHE:
         return _CACHE[key]
     knowledge = retrieve_knowledge(violation)
-    result = _call_claude(_build_prompt(violation, candidates, knowledge))
+    prompt = _build_prompt(violation, candidates, knowledge)
+    result = (_call_claude(prompt, response_schema=EXPLANATION_RESPONSE_SCHEMA)
+              if free_mode() else _call_claude(prompt))
     if free_mode() and (not isinstance(result, dict)
                        or not all(isinstance(result.get(k), str) for k in ("why", "recommendation", "past_case"))
                        or not isinstance(result.get("impact"), list)

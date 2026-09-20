@@ -36,7 +36,7 @@ def fake_transport(monkeypatch, reply="Hello", error=None, raw=None):
             if error:
                 raise error
             payload = raw if raw is not None else json.dumps({
-                "candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": reply}]}}]
+                "candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": reply() if callable(reply) else reply}]}}]
             }).encode()
             return io.BytesIO(payload)
 
@@ -106,14 +106,16 @@ def test_network_errors_count_without_fallback(monkeypatch, free, error, code):
     assert count(free) == 1
 
 
-@pytest.mark.parametrize("raw", [
-    b"{}", b"not-json", b"x" * (dep.MAX_RESPONSE_BYTES + 1),
-    b'{"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"partial"}]}}]}',
-    b'{"candidates":[{"finishReason":"STOP","content":{"parts":[]}}]}',
+@pytest.mark.parametrize("raw,code", [
+    (b"{}", "ai_invalid_response"), (b"not-json", "ai_invalid_response"),
+    (b"x" * (dep.MAX_RESPONSE_BYTES + 1), "ai_invalid_response"),
+    (b'{"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"partial"}]}}]}',
+     "ai_output_truncated"),
+    (b'{"candidates":[{"finishReason":"STOP","content":{"parts":[]}}]}', "ai_invalid_response"),
 ])
-def test_invalid_provider_responses_fail_explicitly(monkeypatch, free, raw):
+def test_invalid_provider_responses_fail_explicitly(monkeypatch, free, raw, code):
     fake_transport(monkeypatch, raw=raw)
-    with pytest.raises(dep.AIError, match="ai_invalid_response"):
+    with pytest.raises(dep.AIError, match=code):
         llm.llm_text("test")
     assert count(free) == 1
 
@@ -233,7 +235,7 @@ def test_quota_can_block_command_retry_without_partial_mutation(client, monkeypa
     for _ in range(9):
         dep.quota_state(free, reserve=True)
     calls = fake_transport(monkeypatch, reply=json.dumps({
-        "ops": [{"op": "move", "id": "sofa", "delta": [-3, 0, 0]}]}))
+        "ops": [{"op": "move", "id": "sofa", "delta": [-3, 0, 0]}], "reply": "Move"}))
     before = client.get("/api/scene").json()
     result = client.post("/api/command?lang=en", json={"text": "Move"})
     assert result.status_code == 429
@@ -384,3 +386,106 @@ def test_public_file_lock_contention_fails_closed(monkeypatch, free):
             llm.llm_text("test")
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     assert not calls and not free.exists()
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_explanation_requests_schema_constrained_json(client, monkeypatch, free, lang):
+    explanation = {
+        "why": "A verified collision restricts access.",
+        "impact": ["Reduced access"],
+        "recommendation": "Use the verified candidate.",
+        "past_case": "See the provided case.",
+    }
+    calls = fake_transport(monkeypatch, reply=json.dumps(explanation))
+    target = client.get("/api/inspect").json()["violations"][0]["id"]
+    response = client.get(f"/api/explain/{target}?lang={lang}")
+    assert response.status_code == 200 and response.json()["analysis"]["llm"] is True
+    config = json.loads(calls[0].data)["generationConfig"]
+    assert config["responseMimeType"] == "application/json"
+    assert config["responseSchema"] == llm.EXPLANATION_RESPONSE_SCHEMA
+    assert config["maxOutputTokens"] == 4096
+    assert count(free) == 1
+
+
+def test_command_retry_retains_operation_schema(client, monkeypatch, free):
+    calls = fake_transport(monkeypatch, reply=json.dumps({
+        "ops": [{"op": "move", "id": "sofa", "delta": [-3, 0, 0]}], "reply": "Move"}))
+    before = client.get("/api/scene").json()
+    response = client.post("/api/command", json={"text": "Move"})
+    assert response.status_code == 200 and response.json()["blocked"]
+    assert len(calls) == count(free) == 2
+    for call in calls:
+        config = json.loads(call.data)["generationConfig"]
+        assert config["responseMimeType"] == "application/json"
+        assert config["responseSchema"] == llm.COMMAND_RESPONSE_SCHEMA
+    assert client.get("/api/scene").json() == before
+
+
+def test_chat_remains_plain_text(client, monkeypatch, free):
+    calls = fake_transport(monkeypatch, reply="A plain answer.")
+    assert client.post("/api/chat", json={"text": "What is a walkway?"}).json() == {"reply": "A plain answer."}
+    assert json.loads(calls[0].data)["generationConfig"] == {"maxOutputTokens": 4096}
+
+
+@pytest.mark.parametrize("lang,fragment", [("ko", "출력 한도"), ("en", "output limit")])
+def test_truncated_json_never_applies_or_retries(client, monkeypatch, free, lang, fragment):
+    before = client.get("/api/scene").json()
+    # Even parseable JSON cannot authorize changes when the provider marks it incomplete.
+    proposal = json.dumps({"ops": [{"op": "delete", "id": "table"}], "reply": "Removed"})
+    calls = fake_transport(monkeypatch, raw=json.dumps({
+        "candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": proposal}]}}]
+    }).encode())
+    response = client.post(f"/api/command?lang={lang}", json={"text": "Delete table"})
+    assert response.status_code == 502
+    assert response.json()["code"] == "ai_output_truncated"
+    assert fragment in response.json()["detail"]
+    assert len(calls) == count(free) == 1
+    assert client.get("/api/scene").json() == before
+
+
+def test_empty_command_is_not_reported_as_success(client, monkeypatch, free):
+    before = client.get("/api/scene").json()
+    calls = fake_transport(monkeypatch, reply='{"ops":[],"reply":"The layout is already correct."}')
+    response = client.post("/api/command?lang=en", json={"text": "소파를 삭제해 줘"})
+    assert response.status_code == 502
+    assert response.json()["code"] == "ai_no_action"
+    assert "not changed" in response.json()["detail"]
+    assert len(calls) == count(free) == 2
+    assert client.get("/api/scene").json() == before
+
+
+def test_empty_command_can_retry_to_exact_sofa_delete(client, monkeypatch, free):
+    before = client.get("/api/scene").json()
+    replies = iter([
+        '{"ops":[],"reply":"The layout is already correct."}',
+        '{"ops":[{"op":"delete","id":"sofa"}],"reply":"Deleted the sofa."}',
+    ])
+    calls = fake_transport(monkeypatch, reply=lambda: next(replies))
+    response = client.post("/api/command?lang=en", json={"text": "소파를 삭제해 줘"})
+    assert response.status_code == 200 and response.json()["applied"]
+    assert response.json()["ops"] == [{"op": "delete", "id": "sofa"}]
+    after = client.get("/api/scene").json()
+    assert after["equipment"] == [item for item in before["equipment"] if item["id"] != "sofa"]
+    assert after["structures"] == before["structures"] and after["rooms"] == before["rooms"]
+    assert len(calls) == count(free) == 2
+    assert "No operations proposed" in json.loads(calls[1].data)["contents"][0]["parts"][0]["text"]
+
+
+@pytest.mark.parametrize("reply", [
+    '```json\n{"ops":[{"op":"delete","id":"sofa"}],"reply":"Deleted"}\n```',
+    '{"ops":[{"op":"delete","id":"sofa"}]}',
+])
+def test_schema_contract_violation_is_not_repaired_or_applied(client, monkeypatch, free, reply):
+    before = client.get("/api/scene").json()
+    calls = fake_transport(monkeypatch, reply=reply)
+    response = client.post("/api/command", json={"text": "소파를 삭제해 줘"})
+    assert response.status_code == 502 and response.json()["code"] == "ai_invalid_response"
+    assert len(calls) == count(free) == 1
+    assert client.get("/api/scene").json() == before
+
+
+def test_legacy_fenced_json_compatibility(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("LLM_PROVIDER", "legacy")
+    monkeypatch.setattr(llm, "llm_text", lambda *a, **kw: '```json\n{"ops":[],"reply":"Legacy"}\n```')
+    assert llm._call_claude("test") == {"ops": [], "reply": "Legacy"}

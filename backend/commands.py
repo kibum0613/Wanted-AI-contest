@@ -11,13 +11,13 @@ import json
 import math
 from typing import Any
 
-from backend.llm import _call_claude
+from backend.llm import COMMAND_RESPONSE_SCHEMA, _call_claude
 from backend.models import Box, Furniture, Walkway, Scene, Structure
 from backend.i18n import TYPE_NAMES, display_name, language_instruction, tr
 from backend.detector import inspect_scene
 from backend.resolver import _vkey
 from backend.placement import place
-from backend.deployment import free_mode, invalid_response, validate_public_scene
+from backend.deployment import AIError, free_mode, invalid_response, validate_public_scene
 
 TYPE_SIZES = {
     "bed": [2.0, 1.1, 0.5], "wardrobe": [1.2, 0.6, 2.0], "desk": [1.2, 0.6, 0.75],
@@ -44,6 +44,9 @@ PROMPT = """당신은 1인 주택(거실·침실·서재) 가구 배치 CAD 어�
 - 가구 배치 가능 여부와 수치는 결정론적 엔진이 검증한다. 검증 전에 성공했다고 단정하지 않는다.
 - 문 개폐 구역(zone)과 창문 앞 구역은 비워둘 것
 - 존재하는 id만 참조할 것
+- 현재 배치의 위반 유무와 관계없이 사용자가 명시한 변경 요청을 수행할 작업을 제안한다.
+- 삭제 요청은 해당 기존 가구의 delete 작업으로 표현한다. 이미 배치가 올바르다는 설명으로 요청을 대체하지 않는다.
+- 요청을 수행할 수 없으면 ops를 빈 배열로 두고 reply에 불가 이유를 명시한다. 실제 작업 없이 완료했다고 답하지 않는다.
 
 순수 JSON만 출력 (코드블록 금지):
 {{"ops":[...], "reply":"수행한 내용을 선택된 언어로 한 문장으로"}}"""
@@ -157,7 +160,8 @@ def run_command(scene: Scene, text: str) -> dict[str, Any]:
     prompt = PROMPT.format(scene=_brief(scene), text=text) + language_instruction()
     old_keys = {_vkey(v) for v in inspect_scene(scene, include_paths=False)["violations"]}
     for attempt in range(2):
-        out = _call_claude(prompt)
+        out = (_call_claude(prompt, response_schema=COMMAND_RESPONSE_SCHEMA)
+               if free_mode() else _call_claude(prompt))
         if not isinstance(out, dict):
             if free_mode():
                 raise invalid_response()
@@ -166,12 +170,15 @@ def run_command(scene: Scene, text: str) -> dict[str, Any]:
         candidate = copy.deepcopy(scene)
         done, errors = [], []
         ops = out.get("ops", [])
-        if free_mode() and ("ops" not in out or not isinstance(out.get("reply", ""), str)):
+        if free_mode() and ("ops" not in out or not isinstance(out.get("reply"), str)):
             raise invalid_response()
         if not isinstance(ops, list) or len(ops) > 20:
             if free_mode():
                 raise invalid_response()
             return {"error": tr("AI 작업 목록 형식이 잘못되었습니다.", "Invalid AI operation list.")}
+        if free_mode() and not ops:
+            errors.append("No operations proposed. Address the user's explicit change request using supported operations; "
+                          "a valid current layout does not cancel a requested change.")
         try:
             for op in ops:
                 if not isinstance(op, dict) or op.get("op") not in {"place", "move", "rotate", "delete", "add_equipment"}:
@@ -198,6 +205,10 @@ def run_command(scene: Scene, text: str) -> dict[str, Any]:
             continue
         if errors:
             if free_mode():
+                if not ops:
+                    raise AIError("ai_no_action", 502,
+                                  "AI가 실행할 작업을 제안하지 않아 배치를 변경하지 않았습니다. 요청을 구체화해 다시 시도하세요.",
+                                  "The AI proposed no operation. The layout was not changed. Please make the request more specific.")
                 raise invalid_response()
             return {"error": tr("명령을 적용하지 않았습니다: ", "Command was not applied: ") + "; ".join(errors),
                     "errors": errors, "applied": []}
