@@ -489,3 +489,31 @@ def test_legacy_fenced_json_compatibility(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "legacy")
     monkeypatch.setattr(llm, "llm_text", lambda *a, **kw: '```json\n{"ops":[],"reply":"Legacy"}\n```')
     assert llm._call_claude("test") == {"ops": [], "reply": "Legacy"}
+
+
+def test_custom_visible_name_reaches_model_with_exact_identity(client, monkeypatch, free):
+    furniture = next(item for item in main.WORK["scene"].furniture if item.id == "sofa")
+    furniture.id, furniture.name = "seat-custom-9", "파란 휴식 의자"
+    calls = fake_transport(monkeypatch, reply=json.dumps({
+        "ops": [{"op": "delete", "id": "seat-custom-9"}], "reply": "Deleted the requested seat."}))
+    response = client.post("/api/command?lang=ko", json={"text": "파란 휴식 의자를 삭제해 줘"})
+    assert response.status_code == 200 and response.json()["applied"]
+    prompt = json.loads(calls[0].data)["contents"][0]["parts"][0]["text"]
+    scene_text = prompt.split("\n", 1)[1].split("\n\n사용자 요청:", 1)[0]
+    item = next(item for item in json.loads(scene_text)["equipment"] if item["id"] == "seat-custom-9")
+    assert item["name"] == item["display_name"] == item["short_name"] == "파란 휴식 의자"
+    assert "furniture_type_names" in prompt and "임의로 id를 만들어 쓰지 않는다" in prompt
+    assert not any(item.id == "seat-custom-9" for item in main.WORK["scene"].furniture)
+    assert count(free) == 1
+
+
+def test_type_name_cannot_replace_actual_identifier(client, monkeypatch, free):
+    furniture = next(item for item in main.WORK["scene"].furniture if item.id == "sofa")
+    furniture.id, furniture.name = "seat-custom-9", "파란 휴식 의자"
+    before = client.get("/api/scene").json()
+    calls = fake_transport(monkeypatch, reply=json.dumps({
+        "ops": [{"op": "delete", "id": "sofa"}], "reply": "Deleted"}))
+    response = client.post("/api/command", json={"text": "소파를 삭제해 줘"})
+    assert response.status_code == 502 and response.json()["code"] == "ai_invalid_response"
+    assert len(calls) == count(free) == 2
+    assert client.get("/api/scene").json() == before

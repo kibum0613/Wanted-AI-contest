@@ -1,8 +1,11 @@
+import json
+
 import pytest
 
 from backend import commands, main
 from backend.detector import inspect_scene
 from backend.models import Scene
+from backend.i18n import LANGUAGE
 from backend.resolver import _vkey
 
 
@@ -107,3 +110,39 @@ def test_impossible_place_and_unknown_near_are_explicit(demo_scene):
     with pytest.raises(ValueError, match="위치|placement"):
         commands._apply_op(demo_scene, {"op": "place", "id": "bed", "room": "study"})
     assert demo_scene.equipment[5].model_dump() == original["equipment"][5]
+
+
+@pytest.mark.parametrize("lang,label", [("ko", "소파 (거실)"), ("en", "Sofa (Living room)")])
+def test_brief_preserves_names_display_labels_and_exact_ids(demo_scene, lang, label):
+    before = demo_scene.model_dump()
+    token = LANGUAGE.set(lang)
+    try:
+        brief = json.loads(commands._brief(demo_scene))
+    finally:
+        LANGUAGE.reset(token)
+    sofa = next(item for item in brief["equipment"] if item["id"] == "sofa")
+    assert sofa["name"] == "소파 (거실)"
+    assert sofa["display_name"] == label
+    assert sofa["short_name"] == label.split(" (")[0]
+    assert brief["furniture_type_names"]["sofa"] == {"ko": "소파", "en": "Sofa"}
+    for key, objects in (("equipment", demo_scene.furniture), ("rooms", demo_scene.rooms),
+                         ("structures", demo_scene.structures), ("pipes", demo_scene.walkways)):
+        assert [(item["id"], item["name"]) for item in brief[key]] == [(obj.id, obj.name) for obj in objects]
+    assert demo_scene.model_dump() == before
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_brief_retains_custom_name_without_using_it_as_identifier(demo_scene, lang):
+    furniture = next(item for item in demo_scene.furniture if item.id == "sofa")
+    furniture.id, furniture.name = "seat-custom-9", "파란 휴식 의자"
+    token = LANGUAGE.set(lang)
+    try:
+        brief = json.loads(commands._brief(demo_scene))
+    finally:
+        LANGUAGE.reset(token)
+    item = next(item for item in brief["equipment"] if item["id"] == "seat-custom-9")
+    assert item["name"] == "파란 휴식 의자" and item["type"] == "sofa"
+    assert "sofa" not in {item["id"] for item in brief["equipment"]}
+    with pytest.raises(ValueError):
+        commands._apply_op(demo_scene, {"op": "delete", "id": furniture.name})
+    assert any(item.id == "seat-custom-9" for item in demo_scene.furniture)
