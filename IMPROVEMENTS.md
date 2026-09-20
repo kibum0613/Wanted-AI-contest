@@ -8,19 +8,45 @@
 
 ## 공개 배포 사전 준비
 
+승인부터 서버 배포·재배포·비용 관리까지의 전체 기록은 [DEPLOYMENT.md](DEPLOYMENT.md)를 따른다.
+
 클라우드 자원/공개 URL과 별도로 애플리케이션 배포 전제 조건을 구현했다.
-**배포 상태: 사용자의 크레딧 확인·비용 승인 후 자원은 준비했지만 코드 미배포·실제 서비스 미검증이다.**
+**배포 상태: 공개 기동/UI/결정론적 기능, 실제 AI 설명·영어 채팅·한국어/영어 삭제 명령을 검증했다. 최종 배포 코드 `3454627`.**
+공개 앱: **<https://wanted-layout-kibum0613.azurewebsites.net>**.
+실제 HTTPS에서 기본 9건·0점 → 자동 수정 5단계·0건·100점(최종 4.289초, 네트워크 포함),
+저장·초기화·복원·Undo/Redo와 브라우저 3D 표시를 확인했다.
+AI 분석·명령의 스키마 기반 JSON 출력과 잘린 응답의 적용 차단을 추가했고,
+격리된 Linux Node를 사용한 전체 pytest **153개가 통과**했다(기존 경고 2개, 13.11초).
+Windows `.exe` interop 실패 대응은 테스트 도구 환경에 한정했고 프로젝트 의존성은 추가하지 않았다.
+후속 `347529a` 배포에서 설명 3.23초·`llm=true`·정상 구조 및 영어 채팅/정확한 ID 삭제가 성공했다.
+이전 한국어 CLI 요청은 PowerShell 5의 `us-ascii` 파이프에서 HTTP 전에 물음표로 바뀌었다.
+따라서 모델의 한국어 이해 부족이라는 결론은 철회한다. `_brief`의 실제 이름/ID 추가는 명확성·사용자 지정 이름 지원에 유효한 별도 개선이다.
+관련 테스트 114개 및 최종 전체 **159개가 통과**했다(기존 경고 2개, **13.57초**, skip 없음).
+`3454627` 배포도 성공했다(78초). Unicode를 보존한 “소파를 삭제해 줘”는 `delete/id=sofa` 작업,
+“요청하신 소파를 삭제했습니다.” 응답 및 실제 씬의 소파 부재까지 확인했다(명령+후속 조회 3.221초).
+공개 브라우저에서도 한국어 선택·실제 Unicode 입력·실행 후 소파 사이드바 항목이 사라지고 WebGL canvas가 유지됐다.
+Demo Reset 클릭 후 소파와 기본 배치가 복귀하여 UI end-to-end 흐름까지 확인했다.
+별도 진단에서 같은 설명 요청이 `STOP`과 정상 필드로 응답한 사실은 확인했으며 출력 예산은 4,096 tokens를 유지했다.
+새 스키마 위반 응답을 임의로 복구하거나 빈 작업을 성공으로 처리하지 않고 명시적으로 거부한다.
 Korea Central 학생 정책 거부 후 승인받은 Japan East Linux Basic B1 인스턴스 1개를 사용한다.
+안내 비용은 **USD $0.019/시간·30일 $13.68**, 학생 크레딧 만료일은 **2027-08-18**이다.
+spending limit On을 유지하고 유료 구독으로 업그레이드하지 않았다. 무료 Gemini 입력/응답의 제품 개선·사람 검토 가능성을 UI에 안내한다.
 `rg-wanted-layout-demo`(그룹 메타데이터 Korea Central), `asp-wanted-layout-b1`(실제 플랜 Japan East),
 `wanted-layout-kibum0613.azurewebsites.net`(Python 3.12/Always On/HTTPS/TLS 1.2/FTP 비활성화)이 준비되었다.
 키는 사용자가 Azure 포털에 직접 등록했으며 애플리케이션 사전 테스트는 실제 키를 사용하지 않았다.
-별도의 일반 `Reply OK` 제공자 연결 시험은 지정 모델에서 성공했지만 앱의 실제 클라우드 통합 검증은 아직 수행하지 않았다.
+별도 일반 `Reply OK` 제공자 연결 시험과 실제 앱의 설명·채팅·명령 검증을 구분하여 기록했다.
 Python App Service 코드 실행 경로는 임시 위치일 수 있으므로 영속 파일은 코드와 분리한 `/home/layout-data/`에 둔다.
 `APP_ENV=production`, `LLM_PROVIDER=gemini-free`, `GEMINI_FREE_TIER_ONLY=true`,
 `GEMINI_MODEL=gemini-3.5-flash-lite`, 무료 프로젝트의 `GEMINI_API_KEY`,
 `AI_QUOTA_FILE=/home/layout-data/ai-quota.json`, `SAVED_LAYOUT_PATH=/home/layout-data/saved_layout.json`을 사용한다.
-시작 명령은 `python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1 --no-access-log`.
+최종 시작 명령은 `sh /home/site/wwwroot/start_azure.sh`이며, 내부에서 uvicorn worker 1개·접근 로그 비활성화로 실행한다.
 Azure `/home` 저장소 활성화 및 인스턴스 1개가 전제이며 `/api/health`가 설정과 저장소를 확인한다.
+Oryx SDK 추출과 대량 파일 복사 정체를 조사한 뒤 전용 패키징 스크립트의 단일 압축 runtime ZIP으로 배포했다.
+`SCM_DO_BUILD_DURING_DEPLOYMENT=false`, `ENABLE_ORYX_BUILD=false`를 **둘 다** 명시하고,
+고정 `PYTHONPATH` 앱 설정은 제거해 시작 스크립트가 로컬 runtime 경로를 지정하도록 했다.
+현대식 `az webapp deploy`가 **RuntimeSuccessful, 성공 1개/실패 0개**로 완료됐다.
+OOM 원인은 확인되지 않았으므로 단정하지 않는다. 실제 재배포·재시작 후 저장/사용량 파일 해시가 동일하고 100점 저장본이 자동 로드됐다.
+실제 동시 채팅은 하나 200/하나 429(`ai_busy`, Retry-After 5), 501자 질문은 제공자 호출 없이 422였다.
 
 | 배포 전제 | 구현 / 확인 |
 |---|---|
@@ -34,8 +60,8 @@ Azure `/home` 저장소 활성화 및 인스턴스 1개가 전제이며 `/api/he
 
 추가 테스트는 네트워크를 가짜 전송기로 대체하여 실제 제공자 키나 할당량을 사용하지 않는다.
 별도 Python 프로세스에서 사용량을 다시 읽는 재시작 검증, 동시 호출 차단, 재시도 한도 차단 시 부분 변경 없음,
-제공자 오류의 HTTP/UI 전달과 이전 테스트를 함께 확인한다. 실제 클라우드 상태와 URL은 이 변경의 검증 범위가 아니다.
-기존 80개를 포함하여 pytest **142개가 통과**했고 Node 기반 양언어 AI 오류 표시 검사도 통과했다.
+제공자 오류의 HTTP/UI 전달과 이전 테스트를 함께 확인한다. 실제 클라우드 검증은 [DEPLOYMENT.md](DEPLOYMENT.md)에 별도로 구분했다.
+최초 사전 준비 시 기존 80개를 포함하여 pytest **142개**, 구조화 출력 수정본 전체 **153개**, 최종 이름 문맥 개선본 전체 **159개**를 확인했다.
 기본 9건→자동 수정 0건·100점은 기존 결정론적 엔진을 유지한다. 상세 운영 설정/한계는 README의 공개 배포 절을 따른다.
 
 ## 1. 단계별 변경

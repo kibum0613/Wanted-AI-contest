@@ -95,16 +95,26 @@ AI가 없어도 검사·해결안·자동 수정·편집은 동작하며, 설명
 명령·채팅은 AI 연결 실패를 명시합니다. API 키와 개인 저장본은 Git에 포함하지 않습니다.
 Three.js는 CDN에서 가져오므로 첫 화면 로드에는 인터넷 연결이 필요합니다.
 
-### 공개 데모 배포 준비 / Public-demo deployment prerequisites
+### 공개 데모 배포·운영 / Public-demo deployment
 
-아래는 **배포 가능한 애플리케이션 설정**이며, 애플리케이션 코드의 클라우드 배포 완료를 의미하지 않습니다.
-**현재 상태(2026-09-20): 사용자 비용 승인 후 Azure 자원을 생성했으나, 코드 미배포·실제 서비스 미검증 상태입니다.**
+승인·지역 변경·비용·자원·환경 변수·수동 재배포·운영 책임의 전체 기록은 [서버 배포 기록 (DEPLOYMENT.md)](DEPLOYMENT.md)에 정리했습니다.
+
+공개 앱: **<https://wanted-layout-kibum0613.azurewebsites.net>**. 아래는 실제 배포 설정과 검증 범위입니다.
+**현재 상태(2026-09-20): 공개 앱과 실제 AI 설명·채팅·한국어/영어 삭제 명령을 검증했습니다. 배포 코드 `3454627`, 최종 전체 테스트 159개 통과입니다.**
+실제 HTTPS 건강 검사 200, 기본 9건·0점 → 자동 수정 5단계·0건·100점(최종 네트워크 포함 **4.289초**),
+저장/초기화/복원/Undo/Redo와 브라우저 3D 표시를 확인했습니다. `347529a` 배포 후 Gemini 설명은 3.23초에 정상 구조와 `llm=true`로 응답했습니다.
+영어의 정확한 `id=sofa` 삭제는 실제 반영됐습니다. 이전 한국어 CLI 시험은 PowerShell 5의 ASCII 파이프에서
+HTTP 전 입력이 물음표로 손상되어 **무효**이며, 서비스/모델의 한국어 제한을 입증하지 않습니다.
+올바른 Unicode의 “소파를 삭제해 줘” 요청은 **실제 소파 삭제에 성공**했습니다.
+응답 `ops=[{"op":"delete","id":"sofa"}]`와 후속 씬 부재를 확인했고, 명령+씬 조회 합계는 **3.221초**였습니다.
+공개 브라우저에서도 한국어 입력·실행 후 소파 사이드바 항목 제거와 WebGL canvas 유지를 확인했고, Demo Reset으로 소파·기본 배치가 복귀했습니다.
 Korea Central은 학생 구독 정책으로 거부되어 사용자가 승인한 **Japan East Linux Basic B1, 인스턴스 1개**로 변경했습니다.
 자원 그룹은 `rg-wanted-layout-demo`(메타데이터 위치 Korea Central), 플랜은 `asp-wanted-layout-b1`(Japan East)입니다.
+안내 비용은 **USD $0.019/시간, 30일 $13.68**(기타 요금/환율/세금 제외)이며 학생 크레딧 만료일은 **2027-08-18**입니다.
+spending limit은 On이고 유료 구독으로 업그레이드하지 않았습니다. 앱 중지만으로 플랜 과금이 멈추지는 않습니다.
 앱 호스트는 `wanted-layout-kibum0613.azurewebsites.net`이며 Python 3.12, Always On, HTTPS 전용/TLS 1.2 이상, FTP 비활성화로 준비했습니다.
 사용자가 Azure 포털에서 Gemini 키를 직접 등록했으며 키는 코드나 문서에 저장하지 않습니다.
-별도의 연결 확인에서 지정 모델에 일반적인 `Reply OK` 요청이 성공했습니다(`maxOutputTokens=32`, thinking 설정 없음, 응답 `OK`).
-이는 제공자 연결 확인일 뿐 애플리케이션의 클라우드 배포·통합 검증 완료를 의미하지 않습니다.
+최초 일반 `Reply OK` 연결 시험과 실제 앱 통합 검증을 구분하여 기록했습니다.
 Azure 등 호스팅 설정에 환경 변수를 등록하고 **인스턴스 1개·worker 1개**로 실행합니다.
 `APP_ENV=production` 또는 `LLM_PROVIDER=gemini-free`이면 로컬 `.env`를 읽지 않습니다.
 
@@ -117,17 +127,27 @@ Azure 등 호스팅 설정에 환경 변수를 등록하고 **인스턴스 1개�
 | `GEMINI_API_KEY` | **결제가 연결되지 않은 무료 Gemini 프로젝트 키**, 호스팅 비밀 설정으로만 전달 |
 | `AI_QUOTA_FILE` | `/home/layout-data/ai-quota.json` |
 | `SAVED_LAYOUT_PATH` | `/home/layout-data/saved_layout.json` |
+| `WEBSITES_ENABLE_APP_SERVICE_STORAGE` | `true` |
+| `SCM_DO_BUILD_DURING_DEPLOYMENT` | `false` (사전 빌드 의존성 포함 ZIP) |
+| `ENABLE_ORYX_BUILD` | `false` (상속된 Oryx 활성화도 명시적으로 해제) |
+| `PYTHONPATH` 앱 설정 | 없음 — 시작 스크립트가 로컬 runtime 경로를 설정 |
 
 ```bash
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1 --no-access-log
+sh /home/site/wwwroot/start_azure.sh
 ```
 
+- `scripts/package_azure.py`로 커밋된 소스와 CPython 3.12 Linux wheel을 `app.tar.gz`에 묶습니다.
+  ZIP은 압축 payload와 시작 스크립트 두 파일뿐이며, 스크립트가 로컬 디스크에 풀어 **worker 1개·접근 로그 비활성화**로 실행합니다.
 - 호스팅 라우팅 포트를 `8000`으로 연결하고 상태 검사 경로를 `/api/health`로 설정합니다.
   Azure App Service의 `/home` 영속 저장소를 활성화하세요
   (`WEBSITES_ENABLE_APP_SERVICE_STORAGE=true`, Linux App Service).
   Python App Service의 실제 코드 실행 위치는 임시 배포 디렉터리일 수 있으므로 코드 옆에 영속 데이터를 저장하지 않습니다.
   배치와 사용량은 위의 절대 `/home/layout-data/` 경로를 그대로 사용해야 재배포·재시작 때 유지됩니다.
-  소스 ZIP 배포 시 의존성 빌드를 위해 `SCM_DO_BUILD_DURING_DEPLOYMENT=true`를 설정합니다.
+  최초 Oryx SDK 추출과 개별 파일 복사 정체 조사 후 단일 압축 runtime 방식으로 전환했습니다.
+  `SCM_DO_BUILD_DURING_DEPLOYMENT=false`, `ENABLE_ORYX_BUILD=false` **둘 다**를 사용하고 고정 `PYTHONPATH` 앱 설정은 제거합니다.
+  한 설정만 끄면 상속된 Oryx 설정 때문에 원격 빌드가 계속 실행될 수 있습니다.
+  현재 성공한 배포 명령은 현대식 `az webapp deploy`입니다.
+  패키징·설정·상태 확인 절차와 이전 deprecated ZipDeploy 조사 이력은 [DEPLOYMENT.md](DEPLOYMENT.md)를 따릅니다.
   **자동 확장·다중 인스턴스·다중 worker·reload·동시에 실행하는 배포 슬롯은 사용하지 않습니다.**
 - 건강 검사는 실제 Google 요청을 하지 않습니다. 설정·사용량 파일·저장 폴더의 쓰기 가능 여부를 검사하며,
   잘못된 설정/손상 파일/저장 실패는 시작 실패 또는 HTTP 503으로 드러납니다. 오류를 숨기고 사용량을 초기화하지 않습니다.
@@ -143,6 +163,13 @@ python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1 --no-a
   Groq/OpenAI/Claude, 템플릿으로의 조용한 대체는 없습니다. `thinkingConfig`는 지정하지 않습니다.
   **API 키만으로 결제 여부를 판별할 수 없으므로 무료 전용 프로젝트에서 Cloud Billing을 연결하지 않아야 합니다.**
   코드의 `GEMINI_FREE_TIER_ONLY=true`는 결제를 기술적으로 끄는 스위치가 아닙니다.
+- AI 분석·명령은 `responseMimeType=application/json`과 기능별 `responseSchema`로 구조화된 출력을 요청합니다.
+  챗봇은 일반 텍스트를 유지합니다. `MAX_TOKENS` 응답은 `ai_output_truncated`로 명시하고,
+  JSON 파싱 가능 여부와 관계없이 잘린 명령을 적용하거나 성공으로 간주하지 않습니다.
+  명령의 빈 작업 목록도 성공으로 처리하지 않습니다. 기존 1회 재시도 안에서 다시 제안받고,
+  여전히 작업이 없으면 `ai_no_action` 오류를 반환합니다. 서버가 사용자 문장을 정규식으로 해석해 AI 작업을 대신 만들지는 않습니다.
+  AI 문맥에는 객체의 저장 이름·표시 이름·짧은 이름과 정확한 ID, 한국어/영어 가구 종류 대응표를 함께 제공합니다.
+  AI가 이름을 실제 ID에 대응시켜 작업을 제안하며, 없는 ID를 이름/종류로 대신 해석하거나 임의 생성하여 적용하지 않습니다.
 - 요청 본문 최대 128 KiB, 질문/명령 1~500자, 대화 기록 최대 8개(각 300자),
   내부 프롬프트 최대 24,000자/64,000 UTF-8 bytes, 출력 최대 4,096 tokens/12,000자,
   제공자 응답 최대 64 KiB, 소켓 대기 최대 60초입니다.
@@ -162,7 +189,9 @@ python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1 --no-a
 
 **English summary:** The user approved provisioning after verifying student credit.
 Japan East Linux Basic B1 resources now exist; Korea Central was rejected by subscription policy.
-Application code has not yet been deployed and the live application has not been verified.
+The public UI, deterministic engine, persistence flows, structured AI explanation, English chat, and Korean/English deletion commands were verified.
+Earlier Korean CLI probes were invalid: PowerShell 5's ASCII pipe corrupted the input before HTTP.
+They do not demonstrate a Korean-language limitation. A Unicode-preserving retry successfully deleted the sofa, confirmed in the actual scene.
 Use a non-billed Gemini project, the exact model and settings above, one worker/instance, and durable `/home` storage.
 Shared AI limits are 10 calls/minute and 400/rolling 24 hours; retries and failed attempts count separately.
 There is no paid/provider fallback. The public scene is shared and unauthenticated; do not submit personal or sensitive data.
@@ -183,6 +212,10 @@ AI 응답은 HTML로 실행하지 않고 텍스트로 표시합니다.
 ### 회귀 테스트 실행
 
 공개 배포 준비 회귀 결과: 기존 80개를 포함한 **142 tests passed**.
+이후 구조화 AI 응답 수정본은 **전체 pytest 153개 통과**(기존 경고 2개, 13.11초)했습니다.
+WSL Windows `.exe` 실행 오류를 피해 checksum 검증한 격리 Linux Node.js 24.18을 사용했고 프로젝트 의존성은 추가하지 않았습니다.
+이름 문맥 보완본은 관련 테스트 **114개**, 최종 전체 테스트 **159개 통과**(기존 경고 2개, **13.57초**, skip 없음)입니다.
+이전 한국어 CLI 시험의 ASCII 입력 손상을 바로잡은 실제 한국어 요청도 삭제 작업과 씬 반영까지 확인했습니다.
 제공자 호출은 테스트 가짜 전송기로 대체하며 무료 할당량/실제 키를 사용하지 않습니다.
 기본 데모 9건 → 자동 수정 0건·100점 및 Node 기반 한국어/영어 UI 검사를 유지합니다.
 
