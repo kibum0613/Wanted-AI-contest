@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Literal
 
 
@@ -124,3 +124,25 @@ class Scene(BaseModel):
 
 Equipment = Furniture
 Pipe = Walkway
+
+
+class CommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    text: str = Field(min_length=1, max_length=500)
+
+    @field_validator("text")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must not be blank")
+        return value
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    role: Literal["user", "bot"]
+    text: str = Field(max_length=300)
+
+
+class ChatRequest(CommandRequest):
+    history: list[ChatMessage] = Field(default_factory=list, max_length=8)

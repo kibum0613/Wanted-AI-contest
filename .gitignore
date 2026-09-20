@@ -6,3 +6,4 @@ venv/
 .pytest_cache/
 backend/data/saved_layout.json
 backend/data/.layout-*.tmp
+backend/data/.saved_layout.json.*.staging

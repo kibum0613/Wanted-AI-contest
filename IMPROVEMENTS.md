@@ -6,6 +6,38 @@
 
 원칙: **모든 좌표·측정값·위반·점수·해결 가능 여부는 결정론적 엔진이 계산한다. AI는 요청을 구조화하고 검증된 사실을 설명한다.**
 
+## 공개 배포 사전 준비
+
+클라우드 자원/공개 URL과 별도로 애플리케이션 배포 전제 조건을 구현했다.
+**배포 상태: 사용자의 크레딧 확인·비용 승인 후 자원은 준비했지만 코드 미배포·실제 서비스 미검증이다.**
+Korea Central 학생 정책 거부 후 승인받은 Japan East Linux Basic B1 인스턴스 1개를 사용한다.
+`rg-wanted-layout-demo`(그룹 메타데이터 Korea Central), `asp-wanted-layout-b1`(실제 플랜 Japan East),
+`wanted-layout-kibum0613.azurewebsites.net`(Python 3.12/Always On/HTTPS/TLS 1.2/FTP 비활성화)이 준비되었다.
+키는 사용자가 Azure 포털에 직접 등록했으며 애플리케이션 사전 테스트는 실제 키를 사용하지 않았다.
+별도의 일반 `Reply OK` 제공자 연결 시험은 지정 모델에서 성공했지만 앱의 실제 클라우드 통합 검증은 아직 수행하지 않았다.
+Python App Service 코드 실행 경로는 임시 위치일 수 있으므로 영속 파일은 코드와 분리한 `/home/layout-data/`에 둔다.
+`APP_ENV=production`, `LLM_PROVIDER=gemini-free`, `GEMINI_FREE_TIER_ONLY=true`,
+`GEMINI_MODEL=gemini-3.5-flash-lite`, 무료 프로젝트의 `GEMINI_API_KEY`,
+`AI_QUOTA_FILE=/home/layout-data/ai-quota.json`, `SAVED_LAYOUT_PATH=/home/layout-data/saved_layout.json`을 사용한다.
+시작 명령은 `python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1 --no-access-log`.
+Azure `/home` 저장소 활성화 및 인스턴스 1개가 전제이며 `/api/health`가 설정과 저장소를 확인한다.
+
+| 배포 전제 | 구현 / 확인 |
+|---|---|
+| 무료 전용 | 지정 모델만 HTTP 호출, 유료/다른 제공자·템플릿 자동 대체 없음; 결제 미연결 프로젝트는 운영자가 확인 |
+| 공용 예산 | 10회/60초·400회/이동 24시간·동시 1회; 실패·명령 재시도도 개별 차감 |
+| 재시작 안전성 | lock 파일 + 원자적 파일 교체 + fsync, 호출 전 예약; 저장소 손상·실패는 503, 초기화로 우회하지 않음 |
+| 제한된 공개 입력 | 본문 128 KiB, 입력 500자, 대화 8×300자, 프롬프트/출력/씬 상한; Pydantic 공개 AI 요청 검증 |
+| 오류 가시성 | 429/413/422/502/503/504 및 오류 코드·재시도 시간; AI 분석/명령/챗봇의 한국어·영어 표시 |
+| 개인정보 고지 | 공용 씬, 민감정보 금지, 무료 Gemini의 제품 개선/사람 검토 가능성을 UI와 README에 표시 |
+| 로컬 호환성 | `APP_ENV=local`, `LLM_PROVIDER=legacy`로 기존 키 우선순위/CLI/템플릿 동작 유지 |
+
+추가 테스트는 네트워크를 가짜 전송기로 대체하여 실제 제공자 키나 할당량을 사용하지 않는다.
+별도 Python 프로세스에서 사용량을 다시 읽는 재시작 검증, 동시 호출 차단, 재시도 한도 차단 시 부분 변경 없음,
+제공자 오류의 HTTP/UI 전달과 이전 테스트를 함께 확인한다. 실제 클라우드 상태와 URL은 이 변경의 검증 범위가 아니다.
+기존 80개를 포함하여 pytest **142개가 통과**했고 Node 기반 양언어 AI 오류 표시 검사도 통과했다.
+기본 9건→자동 수정 0건·100점은 기존 결정론적 엔진을 유지한다. 상세 운영 설정/한계는 README의 공개 배포 절을 따른다.
+
 ## 1. 단계별 변경
 
 | 단계 | 구현 내용 | 확인한 동작 |

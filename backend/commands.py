@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from typing import Any
 
 from backend.llm import _call_claude
@@ -16,6 +17,7 @@ from backend.i18n import TYPE_NAMES, display_name, language_instruction, tr
 from backend.detector import inspect_scene
 from backend.resolver import _vkey
 from backend.placement import place
+from backend.deployment import free_mode, invalid_response, validate_public_scene
 
 TYPE_SIZES = {
     "bed": [2.0, 1.1, 0.5], "wardrobe": [1.2, 0.6, 2.0], "desk": [1.2, 0.6, 0.75],
@@ -157,23 +159,32 @@ def run_command(scene: Scene, text: str) -> dict[str, Any]:
     for attempt in range(2):
         out = _call_claude(prompt)
         if not isinstance(out, dict):
+            if free_mode():
+                raise invalid_response()
             return {"error": tr("AI 호출에 실패했습니다. AI 제공자 설정을 확인하세요.",
                                 "AI request failed. Check your AI provider configuration.")}
         candidate = copy.deepcopy(scene)
         done, errors = [], []
         ops = out.get("ops", [])
+        if free_mode() and ("ops" not in out or not isinstance(out.get("reply", ""), str)):
+            raise invalid_response()
         if not isinstance(ops, list) or len(ops) > 20:
+            if free_mode():
+                raise invalid_response()
             return {"error": tr("AI 작업 목록 형식이 잘못되었습니다.", "Invalid AI operation list.")}
         try:
             for op in ops:
                 if not isinstance(op, dict) or op.get("op") not in {"place", "move", "rotate", "delete", "add_equipment"}:
                     raise ValueError("Unsupported operation")
+                if free_mode():
+                    _validate_public_op(op)
                 if op.get("op") in {"move", "rotate", "delete"}:
                     _, kind, _ = _find(candidate, op["id"])
                     if kind != "furniture":
                         raise ValueError("Only furniture can be modified")
                 done.append(_apply_op(candidate, op))
             candidate = Scene.model_validate(candidate.model_dump())
+            validate_public_scene(candidate)
         except (KeyError, TypeError, ValueError, IndexError) as exc:
             errors.append(str(exc))
         introduced = [] if errors else [
@@ -186,6 +197,8 @@ def run_command(scene: Scene, text: str) -> dict[str, Any]:
                 {"ops": ops, "new_violations": introduced, "errors": errors}, ensure_ascii=False)
             continue
         if errors:
+            if free_mode():
+                raise invalid_response()
             return {"error": tr("명령을 적용하지 않았습니다: ", "Command was not applied: ") + "; ".join(errors),
                     "errors": errors, "applied": []}
         count = len(introduced)
@@ -195,3 +208,23 @@ def run_command(scene: Scene, text: str) -> dict[str, Any]:
                      " / ".join(v["detail"] for v in introduced),
             "new_violations": introduced, "applied": [], "errors": [], "blocked": True,
         }
+
+
+def _validate_public_op(op: dict) -> None:
+    allowed = {
+        "place": {"op", "id", "type", "room", "near"},
+        "move": {"op", "id", "delta"},
+        "rotate": {"op", "id"},
+        "delete": {"op", "id"},
+        "add_equipment": {"op", "type", "center"},
+    }
+    if set(op) - allowed[op["op"]]:
+        raise ValueError("Unexpected operation fields")
+    for key in ("id", "type", "room", "near"):
+        if key in op and (not isinstance(op[key], str) or not 1 <= len(op[key]) <= 80):
+            raise ValueError("Invalid operation identifier")
+    for key, length in (("delta", 3), ("center", 2)):
+        if key in op and (not isinstance(op[key], list) or len(op[key]) != length
+                          or any(type(v) not in (int, float) or not math.isfinite(v) or abs(v) > 30
+                                 for v in op[key])):
+            raise ValueError("Invalid operation coordinates")

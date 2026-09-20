@@ -358,18 +358,24 @@
         <div class="chat-msg bot">안녕하세요! 인테리어가 처음이어도 괜찮아요. 예를 들어 이렇게 물어보세요:<br>· "책상 앞은 얼마나 비워야 해?"<br>· "침대는 창문 옆에 둬도 돼?"<br>· "동선은 어떻게 수정해?"</div>
       </div>
       <div id="chat-inrow">
-        <input id="chat-in" placeholder="무엇이든 물어보세요…" />
+        <input id="chat-in" maxlength="500" placeholder="무엇이든 물어보세요…" />
         <button id="chat-go">▶</button>
       </div>
     </div>
   </div>
   <div id="errorpanel">
     <div class="panel-intro"><div class="panel-title" data-en="Layout review">배치 검토</div><p data-en="Check every detail. Design with confidence.">꼼꼼하게 검토하고, 확신 있게 배치하세요.</p></div>
+    <section class="section-block" id="demo-notice" aria-label="Demo privacy / 데모 개인정보 안내">
+      <p class="section-note" data-en="Shared demo: everyone edits and saves the same scene. Do not enter personal, confidential, or sensitive information, including in object names.">공용 데모: 모든 방문자가 같은 배치를 편집·저장합니다. 객체 이름을 포함해 개인정보·기밀·민감정보를 입력하지 마세요.</p>
+      <p class="section-note" data-en="AI sends the scene, your request, and recent chat to Google. Under free Gemini terms, inputs and responses may be used to improve Google products and reviewed by humans.">AI는 배치·요청·최근 대화를 Google에 전송합니다. 무료 Gemini 약관에 따라 입력과 응답은 Google 제품 개선에 사용되거나 사람이 검토할 수 있습니다.</p>
+      <p class="section-note" data-en="Public AI quota is shared: 10 calls/minute, 400 per rolling 24 hours, one call at a time. Retries count too. No paid/provider fallback. Inspection and auto-fix need no AI quota.">공개 AI 한도는 전체 방문자 공유: 분당 10회·최근 24시간 400회·동시 1회입니다. 재시도도 차감하며 유료/다른 제공자로 전환하지 않습니다. 검사·자동 수정은 AI 한도를 쓰지 않습니다.</p>
+      <a href="https://ai.google.dev/gemini-api/terms" target="_blank" rel="noopener noreferrer" data-en="Gemini API data-use terms ↗">Gemini API 데이터 이용 약관 ↗</a>
+    </section>
     <section class="copilot-panel">
     <h2><span class="ai-spark" aria-hidden="true">✦</span><span data-en="AI Copilot">AI 코파일럿</span></h2>
     <p class="section-note" data-en="Describe a change. Let your copilot help.">원하는 변경을 말하면 코파일럿이 도와드려요.</p>
     <div id="cmd-row">
-      <input id="cmd-input" placeholder="예: 책상을 창가로 옮겨줘" />
+      <input id="cmd-input" maxlength="500" placeholder="예: 책상을 창가로 옮겨줘" />
       <button id="cmd-send">▶</button>
     </div>
     <div id="cmd-reply" aria-live="polite"></div>
@@ -1313,8 +1319,9 @@ async function toggleCandidates(card, violation) {
     let r;
     try {
       r = await (await api(`/api/explain/${encodeURIComponent(violation.id)}`)).json();
-    } catch {
-      box.textContent = t('⚠ AI 분석에 실패했습니다.', '⚠ AI analysis failed.');
+    } catch (error) {
+      if (revision === languageRevision && box.isConnected)
+        box.textContent = error.message || t('⚠ AI 분석에 실패했습니다.', '⚠ AI analysis failed.');
       return;
     }
     if (revision !== languageRevision || !box.isConnected) return;
@@ -1551,8 +1558,8 @@ async function sendCommand() {
     if (!r.error) {
       input.value = '';
     }
-  } catch {
-    if (revision === languageRevision) box.textContent = t('⚠ 명령 처리에 실패했습니다.', '⚠ Command failed.');
+  } catch (error) {
+    if (revision === languageRevision) box.textContent = error.message || t('⚠ 명령 처리에 실패했습니다.', '⚠ Command failed.');
   } finally {
     btn.disabled = false; input.disabled = false;
   }
@@ -1598,15 +1605,16 @@ async function sendChat() {
     const r = await (await api('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, history: chatHistory }),
+      body: JSON.stringify({ text, history: chatHistory.slice(-8).map(m => ({role: m.role, text: m.text.slice(0, 300)})) }),
     })).json();
     if (revision !== languageRevision) return;
     thinking.remove();
     chatMsg(r.reply, 'bot');
     chatHistory.push({ role: 'user', text }, { role: 'bot', text: r.reply });
     if (chatHistory.length > 12) chatHistory.splice(0, chatHistory.length - 12);
-  } catch {
-    thinking.textContent = t('⚠ 답변 생성에 실패했습니다.', '⚠ Could not generate a reply.');
+  } catch (error) {
+    if (revision === languageRevision)
+      thinking.textContent = error.message || t('⚠ 답변 생성에 실패했습니다.', '⚠ Could not generate a reply.');
   } finally {
     btn.disabled = false; input.disabled = false; input.focus();
   }

@@ -72,7 +72,13 @@ const selectedId = null;
 const registry = new Map();
 const tooltip = new Element();
 const chatHistory = [];
-const chatMsg = () => {};
+const chatMessages = [];
+const chatMsg = text => {
+  const message = new Element();
+  message.textContent = text;
+  chatMessages.push(message);
+  return message;
+};
 const renderScene = () => {};
 let sceneLoads = 0, inspections = 0;
 const loadScene = async () => { sceneLoads++; };
@@ -83,6 +89,7 @@ const code = [
   section('async function toggleCandidates(', "document.getElementById('reset-btn').onclick"),
   section('async function showReport()', '// ---------- Natural-language commands'),
   section('async function sendCommand()', "document.getElementById('cmd-send').onclick"),
+  section('async function sendChat()', "document.getElementById('chat-go').onclick"),
   section("document.getElementById('add-obj').onclick", "document.getElementById('del-obj').onclick"),
   section('async function refreshStorage()', '// ---------- Design tools'),
   section("document.getElementById('save-btn').onclick", '// ---------- Undo / Redo'),
@@ -199,6 +206,37 @@ response = {analysis: {why: malicious, impact: [malicious], recommendation: mali
 await wrap.children[1].onclick();
 assert(!wrap.children.at(-1).innerHTML.includes('<img'));
 assert(wrap.children.at(-1).innerHTML.includes('Expected impact'));
+
+assert(html.includes('Shared demo: everyone edits and saves the same scene.'));
+assert(html.includes('사람이 검토할 수 있습니다.'));
+assert.match(html, /id="chat-in" maxlength="500"/);
+assert.match(html, /id="cmd-input" maxlength="500"/);
+for (const language of ['en', 'ko']) {
+  lang = language;
+  const quotaMessage = language === 'en' ? 'The shared AI daily quota is exhausted.' : '공용 AI 일일 한도에 도달했습니다.';
+  fetch = async () => ({ok: false, status: 429,
+    headers: {get: () => 'application/json'},
+    json: async () => ({detail: quotaMessage, code: 'ai_daily_quota'})});
+  document.getElementById('cmd-input').value = 'test quota';
+  await sendCommand();
+  assert(document.getElementById('cmd-reply').textContent.includes(quotaMessage));
+  document.getElementById('chat-in').value = 'test quota';
+  await sendChat();
+  assert(chatMessages.at(-1).textContent.includes(quotaMessage));
+  await wrap.children[1].onclick();
+  assert(wrap.children.at(-1).textContent.includes(quotaMessage));
+}
+fetch = async (url, options) => {
+  const body = JSON.parse(options.body);
+  assert.equal(body.history.length, 8);
+  assert(body.history.every(message => message.text.length <= 300));
+  return {ok: true, json: async () => ({reply: 'ok'})};
+};
+chatHistory.push(...Array.from({length: 12}, () => ({role: 'bot', text: 'x'.repeat(500)})));
+document.getElementById('chat-in').value = 'hello';
+await sendChat();
+fetch = workingFetch;
+lang = 'en';
 
 response = {summary: {score: 34, checks_run: 10, passed: 4, violations: 6},
   scene_name: malicious, generated: malicious,

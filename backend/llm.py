@@ -4,8 +4,8 @@ Role separation: every number and every fix candidate comes from the
 deterministic engines (detector/resolver). The LLM only turns those verified
 facts into an engineer-friendly explanation and cites similar past cases.
 
-Backend: Claude Code CLI in headless mode (`claude -p`), authenticated via
-the user's Claude Max subscription. Falls back to a template if unavailable.
+Public backend: explicitly selected, quota-guarded free Gemini with no fallback.
+Local legacy mode retains API-key priority, Claude CLI, and template fallback.
 """
 from __future__ import annotations
 
@@ -13,10 +13,16 @@ import json
 import os
 import shutil
 import subprocess
+import socket
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 from backend.i18n import LANGUAGE, language_instruction
+from backend.deployment import (
+    AIError, CALL_SLOT, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, MAX_RESPONSE_BYTES,
+    config_error, free_mode, invalid_response, public_mode, quota_state, validate_config,
+)
 
 KNOWLEDGE_FILE = Path(__file__).resolve().parent / "data" / "knowledge.json"
 CLAUDE_TIMEOUT_S = 90
@@ -25,6 +31,8 @@ HTTP_TIMEOUT_S = 60
 
 def _load_env() -> None:
     """Load KEY=VALUE pairs from repo-root .env (gitignored) into os.environ."""
+    if public_mode() or free_mode():
+        return
     env_file = Path(__file__).resolve().parent.parent / ".env"
     if not env_file.exists():
         return
@@ -135,6 +143,64 @@ def _gemini_text(prompt: str) -> str | None:
         return None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _free_gemini_text(prompt: str) -> str:
+    path = validate_config()
+    if not isinstance(prompt, str) or len(prompt) > MAX_PROMPT_CHARS or len(prompt.encode("utf-8")) > 64000:
+        raise AIError("ai_prompt_limit", 413, "AI 요청이 너무 큽니다. 배치나 대화를 줄여주세요.",
+                      "The AI request is too large. Reduce the scene or conversation.")
+    if not CALL_SLOT.acquire(blocking=False):
+        raise AIError("ai_busy", 429, "다른 방문자의 AI 요청을 처리 중입니다. 잠시 후 다시 시도하세요.",
+                      "Another visitor's AI request is in progress. Please try shortly.", 5)
+    try:
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 4096},
+        }
+        request = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": os.environ["GEMINI_API_KEY"]})
+        opener = urllib.request.build_opener(_NoRedirect)
+        quota_state(path, reserve=True)
+        try:
+            with opener.open(request, timeout=HTTP_TIMEOUT_S) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise invalid_response()
+            out = json.loads(raw)
+            candidate = out["candidates"][0]
+            if candidate.get("finishReason") != "STOP":
+                raise invalid_response()
+            parts = candidate["content"]["parts"]
+            text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+            if not text or len(text) > MAX_OUTPUT_CHARS:
+                raise invalid_response()
+            return text
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise config_error() from exc
+            if exc.code == 429:
+                raise AIError("ai_provider_quota", 429, "무료 Gemini 한도에 도달했습니다. 나중에 다시 시도하세요.",
+                              "The free Gemini provider quota is exhausted. Try later.", 60) from exc
+            raise AIError("ai_provider_error", 502, "Gemini 제공자 요청에 실패했습니다. 다른 제공자로 전환하지 않습니다.",
+                          "The Gemini provider request failed. No other provider will be used.") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise AIError("ai_timeout", 504, "Gemini 응답 시간이 초과되었습니다.",
+                          "The Gemini request timed out.") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise AIError("ai_unavailable", 503, "Gemini에 연결할 수 없습니다. 나중에 다시 시도하세요.",
+                          "Gemini is unavailable. Please try later.") from exc
+        except (ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+            raise invalid_response() from exc
+    finally:
+        CALL_SLOT.release()
+
+
 def _openai_compat_text(prompt: str, url: str, key: str, model: str) -> str | None:
     out = _post_json(url, {
         "model": model,
@@ -150,6 +216,9 @@ def llm_text(prompt: str) -> str | None:
     """Fast-provider dispatch: Gemini/Groq/OpenAI via direct HTTP if an API key
     is configured (1-3s), otherwise fall back to the Claude Code CLI (slower
     because every call cold-starts a full CLI session)."""
+    validate_config()
+    if free_mode():
+        return _free_gemini_text(prompt)
     if os.environ.get("GEMINI_API_KEY"):
         r = _gemini_text(prompt)
         if r:
@@ -181,8 +250,15 @@ def _call_claude(prompt: str) -> dict | None:
         if text.startswith("```"):
             text = text.strip("`")
             text = text[text.find("{"):text.rfind("}") + 1]
-        return json.loads(text)
+        result = json.loads(text)
+        if free_mode() and not isinstance(result, dict):
+            raise invalid_response()
+        return result
+    except AIError:
+        raise
     except Exception:
+        if free_mode():
+            raise invalid_response()
         return None
 
 
@@ -213,11 +289,18 @@ def _fallback(violation: dict, candidates: list[dict], knowledge: dict) -> dict:
 
 
 def explain_violation(violation: dict, candidates: list[dict]) -> dict[str, Any]:
-    key = json.dumps([LANGUAGE.get(), violation, candidates], sort_keys=True, ensure_ascii=False)
+    validate_config()
+    key = json.dumps([os.environ.get("LLM_PROVIDER", "legacy"), LANGUAGE.get(), violation, candidates],
+                     sort_keys=True, ensure_ascii=False)
     if key in _CACHE:
         return _CACHE[key]
     knowledge = retrieve_knowledge(violation)
     result = _call_claude(_build_prompt(violation, candidates, knowledge))
+    if free_mode() and (not isinstance(result, dict)
+                       or not all(isinstance(result.get(k), str) for k in ("why", "recommendation", "past_case"))
+                       or not isinstance(result.get("impact"), list)
+                       or not all(isinstance(v, str) for v in result["impact"])):
+        raise invalid_response()
     if result is None:
         result = _fallback(violation, candidates, knowledge)
     else:
@@ -226,6 +309,8 @@ def explain_violation(violation: dict, candidates: list[dict]) -> dict[str, Any]
         "rules": [r["id"] for r in knowledge["rules"]],
         "cases": [c["id"] for c in knowledge["cases"]],
     }
+    if len(_CACHE) >= 128:
+        _CACHE.pop(next(iter(_CACHE)))
     _CACHE[key] = result
     return result
 

@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
+from contextlib import asynccontextmanager
 from threading import RLock
 from uuid import uuid4
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
@@ -22,16 +23,57 @@ from backend.chat import answer as chat_answer
 from backend.commands import run_command
 from backend.detector import inspect_scene
 from backend.llm import explain_violation
-from backend.models import Scene
+from backend.models import ChatRequest, CommandRequest, Scene
+from backend.deployment import (
+    AIError, MAX_BODY_BYTES, atomic_json, public_mode, quota_state, storage_error,
+    validate_config, validate_public_scene,
+)
 from backend.resolver import apply_action, resolve_violation
 from backend.i18n import LANGUAGE, code_name, display_name, tr
 
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
 DATA_FILE = BASE_DIR / "data" / "house2.json"
-SAVED_FILE = BASE_DIR / "data" / "saved_layout.json"
+SAVED_FILE = Path(os.environ.get("SAVED_LAYOUT_PATH", str(BASE_DIR / "data" / "saved_layout.json")))
 
-app = FastAPI(title="AI Home Layout Debugger")
+
+def deployment_readiness() -> None:
+    quota = validate_config()
+    if quota is not None:
+        quota_state(quota)
+    if public_mode():
+        validate_public_scene(WORK["scene"])
+        probe = SAVED_FILE.parent / (".storage-check-" + uuid4().hex)
+        try:
+            atomic_json(probe, {})
+            probe.unlink()
+        except OSError as exc:
+            raise storage_error() from exc
+
+
+@asynccontextmanager
+async def lifespan(app):
+    deployment_readiness()
+    yield
+
+
+app = FastAPI(title="AI Home Layout Debugger", lifespan=lifespan)
+
+
+@app.exception_handler(AIError)
+async def ai_error_handler(request, exc):
+    return JSONResponse(status_code=exc.status,
+                        content={"detail": exc.message, "code": exc.code,
+                                 "retry_after": exc.retry_after},
+                        headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else {})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request, exc):
+    return JSONResponse(status_code=422, content={
+        "detail": tr("입력 형식 또는 길이가 잘못되었습니다. 질문/명령은 1~500자, 대화는 최대 8개(각 300자)입니다.",
+                     "Invalid input format or size. Questions/commands need 1–500 characters; history allows 8 messages of 300 characters."),
+        "code": "invalid_payload"})
 
 
 @app.middleware("http")
@@ -41,6 +83,16 @@ async def select_language(request, call_next):
         return JSONResponse(status_code=422, content={"detail": "lang must be ko or en"})
     token = LANGUAGE.set(lang)
     try:
+        if public_mode():
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > MAX_BODY_BYTES:
+                    return JSONResponse(status_code=413, content={
+                        "detail": tr("요청 크기 제한(128 KiB)을 초과했습니다.",
+                                     "The request exceeds the 128 KiB size limit."),
+                        "code": "request_too_large"})
+            request._body = bytes(body)
         return await call_next(request)
     finally:
         LANGUAGE.reset(token)
@@ -68,6 +120,7 @@ def _log(kind: str, text: str) -> None:
 
 
 def _mutate(new_scene: Scene) -> None:
+    validate_public_scene(new_scene)
     with STATE_LOCK:
         UNDO.append(WORK["scene"])
         if len(UNDO) > 50:
@@ -94,21 +147,21 @@ def update_scene(scene: Scene) -> dict:
 @app.post("/api/save")
 def save_scene() -> dict:
     """Atomically save the working layout without modifying the original demo."""
-    temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=SAVED_FILE.parent,
-                                         prefix=".layout-", suffix=".tmp", delete=False) as f:
-            temporary = Path(f.name)
-            json.dump(WORK["scene"].model_dump(by_alias=True), f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        temporary.replace(SAVED_FILE)
+        with STATE_LOCK:
+            atomic_json(SAVED_FILE, WORK["scene"].model_dump(by_alias=True))
     except OSError as exc:
-        raise HTTPException(500, detail=tr("저장에 실패했습니다: ", "Save failed: ") + str(exc)) from exc
-    finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
+        raise HTTPException(500, detail=tr("저장에 실패했습니다. 저장소를 확인하세요.",
+                                          "Save failed. Check the storage volume.")) from exc
     return {"saved": True}
+
+
+@app.get("/api/health")
+def health() -> dict:
+    deployment_readiness()
+    return {"status": "ok", "provider": os.environ.get("LLM_PROVIDER", "legacy"),
+            "shared_scene": True, "ai_limits": {"per_minute": 10, "per_24_hours": 400, "concurrent": 1}
+            if os.environ.get("LLM_PROVIDER") == "gemini-free" else None}
 
 
 @app.get("/api/storage")
@@ -230,10 +283,10 @@ def autofix() -> dict:
 
 
 @app.post("/api/command")
-def command(body: dict = Body(...)) -> dict:
+def command(body: CommandRequest) -> dict:
     """Natural-language design command via LLM -> structured ops -> re-inspect."""
     original = WORK["scene"]
-    result = run_command(original, str(body.get("text", ""))[:500])
+    result = run_command(original, body.text)
     with STATE_LOCK:
         if WORK["scene"] is not original:
             raise HTTPException(409, detail=tr("배치가 변경되었습니다. 명령을 다시 실행하세요.",
@@ -278,10 +331,10 @@ def report() -> dict:
 
 
 @app.post("/api/chat")
-def chat(body: dict = Body(...)) -> dict:
+def chat(body: ChatRequest) -> dict:
     """Read-only help-desk chatbot (equipment roles, layout rules, tool usage)."""
     return {"reply": chat_answer(
-        WORK["scene"], str(body.get("text", "")), body.get("history") or [])}
+        WORK["scene"], body.text, [message.model_dump() for message in body.history])}
 
 
 @app.post("/api/reset")

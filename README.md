@@ -95,6 +95,81 @@ AI가 없어도 검사·해결안·자동 수정·편집은 동작하며, 설명
 명령·채팅은 AI 연결 실패를 명시합니다. API 키와 개인 저장본은 Git에 포함하지 않습니다.
 Three.js는 CDN에서 가져오므로 첫 화면 로드에는 인터넷 연결이 필요합니다.
 
+### 공개 데모 배포 준비 / Public-demo deployment prerequisites
+
+아래는 **배포 가능한 애플리케이션 설정**이며, 애플리케이션 코드의 클라우드 배포 완료를 의미하지 않습니다.
+**현재 상태(2026-09-20): 사용자 비용 승인 후 Azure 자원을 생성했으나, 코드 미배포·실제 서비스 미검증 상태입니다.**
+Korea Central은 학생 구독 정책으로 거부되어 사용자가 승인한 **Japan East Linux Basic B1, 인스턴스 1개**로 변경했습니다.
+자원 그룹은 `rg-wanted-layout-demo`(메타데이터 위치 Korea Central), 플랜은 `asp-wanted-layout-b1`(Japan East)입니다.
+앱 호스트는 `wanted-layout-kibum0613.azurewebsites.net`이며 Python 3.12, Always On, HTTPS 전용/TLS 1.2 이상, FTP 비활성화로 준비했습니다.
+사용자가 Azure 포털에서 Gemini 키를 직접 등록했으며 키는 코드나 문서에 저장하지 않습니다.
+별도의 연결 확인에서 지정 모델에 일반적인 `Reply OK` 요청이 성공했습니다(`maxOutputTokens=32`, thinking 설정 없음, 응답 `OK`).
+이는 제공자 연결 확인일 뿐 애플리케이션의 클라우드 배포·통합 검증 완료를 의미하지 않습니다.
+Azure 등 호스팅 설정에 환경 변수를 등록하고 **인스턴스 1개·worker 1개**로 실행합니다.
+`APP_ENV=production` 또는 `LLM_PROVIDER=gemini-free`이면 로컬 `.env`를 읽지 않습니다.
+
+| 환경 변수 | 공개 데모 값 |
+|---|---|
+| `APP_ENV` | `production` |
+| `LLM_PROVIDER` | `gemini-free` |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` (다른 모델은 설정 오류) |
+| `GEMINI_FREE_TIER_ONLY` | `true` (운영자가 무료 프로젝트임을 확인했다는 명시적 승인) |
+| `GEMINI_API_KEY` | **결제가 연결되지 않은 무료 Gemini 프로젝트 키**, 호스팅 비밀 설정으로만 전달 |
+| `AI_QUOTA_FILE` | `/home/layout-data/ai-quota.json` |
+| `SAVED_LAYOUT_PATH` | `/home/layout-data/saved_layout.json` |
+
+```bash
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1 --no-access-log
+```
+
+- 호스팅 라우팅 포트를 `8000`으로 연결하고 상태 검사 경로를 `/api/health`로 설정합니다.
+  Azure App Service의 `/home` 영속 저장소를 활성화하세요
+  (`WEBSITES_ENABLE_APP_SERVICE_STORAGE=true`, Linux App Service).
+  Python App Service의 실제 코드 실행 위치는 임시 배포 디렉터리일 수 있으므로 코드 옆에 영속 데이터를 저장하지 않습니다.
+  배치와 사용량은 위의 절대 `/home/layout-data/` 경로를 그대로 사용해야 재배포·재시작 때 유지됩니다.
+  소스 ZIP 배포 시 의존성 빌드를 위해 `SCM_DO_BUILD_DURING_DEPLOYMENT=true`를 설정합니다.
+  **자동 확장·다중 인스턴스·다중 worker·reload·동시에 실행하는 배포 슬롯은 사용하지 않습니다.**
+- 건강 검사는 실제 Google 요청을 하지 않습니다. 설정·사용량 파일·저장 폴더의 쓰기 가능 여부를 검사하며,
+  잘못된 설정/손상 파일/저장 실패는 시작 실패 또는 HTTP 503으로 드러납니다. 오류를 숨기고 사용량을 초기화하지 않습니다.
+- 실제 제공자 호출을 모든 AI 기능이 공유하며 **최근 60초 최대 10회·최근 24시간 최대 400회·동시 1회**입니다.
+  24시간 이동 창은 제공자 달력 날짜의 일일 한도보다 보수적입니다. 명령의 엔진 검증 재시도(최대 1회)도 별도 차감합니다.
+  HTTP 오류·시간 초과·안전 필터·잘못된 응답도 차감하고 환급하지 않습니다. 확인 적용·검사·자동 수정·캐시 적중은 호출하지 않습니다.
+- 파일 lock + 원자적 교체 + `fsync`로 호출 **전에** 시각을 저장합니다. 재시작해도 한도가 유지됩니다.
+  SQLite/WAL은 사용하지 않습니다. 파일 시스템의 잠금·원자적 rename·`fsync` 지원이 필요합니다.
+  호출 직전 프로세스가 종료되면 실제 호출 없이 1회 차감될 수 있습니다(한도 초과보다 안전한 방향).
+  **사용량 파일/lock 파일을 삭제하거나 경로를 변경하거나 과거 백업으로 되돌리지 마세요.**
+  손상 시 운영자가 점검해야 하며 마지막 호출 후 24시간이 지나기 전에는 새 빈 파일로 초기화하지 않습니다.
+- `gemini-free`는 오직 지정된 Gemini REST 모델만 사용합니다. 자동 네트워크 재시도, 다른 모델,
+  Groq/OpenAI/Claude, 템플릿으로의 조용한 대체는 없습니다. `thinkingConfig`는 지정하지 않습니다.
+  **API 키만으로 결제 여부를 판별할 수 없으므로 무료 전용 프로젝트에서 Cloud Billing을 연결하지 않아야 합니다.**
+  코드의 `GEMINI_FREE_TIER_ONLY=true`는 결제를 기술적으로 끄는 스위치가 아닙니다.
+- 요청 본문 최대 128 KiB, 질문/명령 1~500자, 대화 기록 최대 8개(각 300자),
+  내부 프롬프트 최대 24,000자/64,000 UTF-8 bytes, 출력 최대 4,096 tokens/12,000자,
+  제공자 응답 최대 64 KiB, 소켓 대기 최대 60초입니다.
+  공개 씬은 총 객체 100개, ID 80자/이름 120자, 좌표 절댓값 30m,
+  동선당 경유점 2~100개, 규칙/동선 폭 10,000mm 이하로 제한합니다.
+- API는 `detail`(선택 언어), `code`, 필요 시 `retry_after`와 `Retry-After`를 반환합니다.
+  429는 공용 사용량/동시 요청/제공자 한도, 503은 설정·연결·저장소 오류,
+  502는 제공자/응답 오류, 504는 시간 초과, 413/422는 크기/입력 오류입니다.
+  AI 분석·명령·채팅 UI 모두 한국어/영어 오류를 그대로 표시하며 키·프롬프트·제공자 오류 본문은 로그에 출력하지 않습니다.
+- 공개 데모는 **인증 없는 공용 씬**입니다. 다른 방문자가 편집·저장·초기화할 수 있습니다.
+  개인별 프로젝트 격리·인증·방문자별 속도 제한·전체 CPU 작업 한도는 제공하지 않으므로 악의적 트래픽 대응은 호스팅 계층에서 해야 합니다.
+  Undo/Redo와 작업 이력은 메모리에만 있고, 명시적 **저장**만 재시작 후 복구됩니다.
+- 무료 Gemini에는 배치·질문·최근 대화가 전송됩니다. Google은 입력/응답을 제품 개선에 사용하고
+  사람이 검토할 수 있으므로 **개인정보·기밀·민감정보를 입력하지 마세요**.
+  UI에도 양언어로 고지합니다. 지역별 예외와 이용 조건은
+  [공식 Gemini API 약관](https://ai.google.dev/gemini-api/terms)을 확인하세요.
+
+**English summary:** The user approved provisioning after verifying student credit.
+Japan East Linux Basic B1 resources now exist; Korea Central was rejected by subscription policy.
+Application code has not yet been deployed and the live application has not been verified.
+Use a non-billed Gemini project, the exact model and settings above, one worker/instance, and durable `/home` storage.
+Shared AI limits are 10 calls/minute and 400/rolling 24 hours; retries and failed attempts count separately.
+There is no paid/provider fallback. The public scene is shared and unauthenticated; do not submit personal or sensitive data.
+Free Gemini inputs/outputs may be used for product improvement and human review under Google's terms.
+For local legacy provider priority/fallback, explicitly set `APP_ENV=local` and `LLM_PROVIDER=legacy`
+(the backward-compatible local default); production refuses that selection.
+
 ## 테스트
 
 ### 표시 언어
@@ -106,6 +181,10 @@ API는 `?lang=ko` 또는 `?lang=en`으로 위반 설명·해결안·AI 응답의
 AI 응답은 HTML로 실행하지 않고 텍스트로 표시합니다.
 
 ### 회귀 테스트 실행
+
+공개 배포 준비 회귀 결과: 기존 80개를 포함한 **142 tests passed**.
+제공자 호출은 테스트 가짜 전송기로 대체하며 무료 할당량/실제 키를 사용하지 않습니다.
+기본 데모 9건 → 자동 수정 0건·100점 및 Node 기반 한국어/영어 UI 검사를 유지합니다.
 
 저장은 원본 데모가 아닌 `backend/data/saved_layout.json`에 기록됩니다(버전 관리 제외).
 앱 시작 시 저장본이 있으면 불러옵니다. **저장본 복원**과 **데모 초기화**는 모두 Undo/Redo가 가능하며,
